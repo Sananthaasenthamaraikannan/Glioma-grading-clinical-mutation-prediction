@@ -1,0 +1,172 @@
+---
+title: "Logistic Regression"
+author: "Sananthaa J S"
+date: "2026-03-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(pROC)      
+library(rms) 
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+# At the top of 02_LogisticRegression.Rmd
+library(tidyverse)
+df <- read.csv("D:/Giloma Grading Mutation Prediction/Glioma-grading-clinical-mutation-prediction/DATA/glioma+grading+clinical+and+mutation+features+dataset/TCGA_InfoWithGrade.csv")
+
+df <- df %>%
+  mutate(
+    Grade_f  = factor(Grade, levels = c(0,1), labels = c("LGG","GBM")),
+    Gender_f = factor(Gender, levels = c(0,1), labels = c("Male","Female")),
+    Race_f   = factor(Race, levels = c(0,1,2,3),
+                      labels = c("White","Black/African American",
+                                 "Asian","American Indian/Alaska Native"))
+  )
+```
+
+```{r}
+set.seed(123)
+
+train_idx <- c(
+  sample(which(df$Grade == 0), size = round(0.7 * sum(df$Grade == 0))),
+  sample(which(df$Grade == 1), size = round(0.7 * sum(df$Grade == 1)))
+)
+
+train <- df[train_idx, ]
+test  <- df[-train_idx, ]
+
+cat("Training set:", nrow(train), "\n")
+cat("Test set:    ", nrow(test),  "\n")
+
+prop.table(table(train$Grade_f)) * 100
+prop.table(table(test$Grade_f))  * 100
+```
+
+```{r}
+model_lr <- glm(
+  Grade ~ Age_at_diagnosis + Gender + Race +
+          IDH1 + TP53 + ATRX + PTEN + EGFR + CIC + MUC16 + PIK3CA +
+          NF1 + PIK3R1 + FUBP1 + RB1 + NOTCH1 + BCOR + CSMD3 +
+          SMARCA4 + GRIN2A + IDH2 + FAT4 + PDGFRA,
+  data   = train,
+  family = binomial
+)
+
+summary(model_lr)
+```
+
+#Odds ratios with 95% confidence intervals
+
+```{r }
+or_table <- data.frame(
+  OR    = exp(coef(model_lr)),
+  Lower = exp(confint(model_lr))[, 1],
+  Upper = exp(confint(model_lr))[, 2]
+) %>%
+  round(3) %>%
+  filter(rownames(.) != "(Intercept)") %>%
+  arrange(OR)
+
+print(or_table)
+```
+
+```{r }
+# predicted probabilities GBM
+pred_prob  <- predict(model_lr, newdata = test, type = "response")
+
+# At 0.5 threshold
+pred_class <- ifelse(pred_prob >= 0.5, 1, 0)
+
+# confusion matrix
+conf_mat <- table(Predicted = pred_class, Actual = test$Grade)
+print(conf_mat)
+
+TP <- conf_mat[2, 2]
+TN <- conf_mat[1, 1]
+FP <- conf_mat[2, 1]
+FN <- conf_mat[1, 2]
+
+accuracy    <- (TP + TN) / sum(conf_mat)
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+
+cat("\nAccuracy:", round(accuracy,    3), "\n")
+cat("Sensitivity:", round(sensitivity, 3), "\n")
+cat("Specificity:", round(specificity, 3), "\n")
+```
+#ROC curve and AUC
+
+```{r }
+roc_obj <- roc(test$Grade, pred_prob)
+auc_val <- auc(roc_obj)
+cat("AUC:", round(auc_val, 3), "\n")
+
+plot(roc_obj,
+     col  = "#3B8BD4",
+     lwd  = 2,
+     main = paste0("ROC curve — logistic regression (AUC = ",
+                   round(auc_val, 3), ")"))
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+```
+
+---
+
+#Brier score
+
+```{r }
+brier <- mean((pred_prob - test$Grade)^2)
+cat("Brier score:", round(brier, 4), "\n")
+
+null_brier <- mean((mean(train$Grade) - test$Grade)^2)
+cat("Null Brier:", round(null_brier, 4), "\n")
+cat("Brier skill:", round(1 - brier / null_brier, 3),
+    "(higher = better than null)\n")
+```
+
+---
+
+#Calibration curve
+From syllabus §7: calibration asks whether predicted probabilities match
+observed event rates. A perfectly calibrated model sits on the diagonal.
+The calibration slope should be ~1 and intercept ~0.
+
+```{r }
+val.prob(pred_prob, test$Grade)
+```
+
+```{r }
+cat("Results\n")
+cat("Logistic regression, all 23 predictors\n")
+cat("Train n:", nrow(train), "\n")
+cat("Test n:", nrow(test),  "\n")
+cat("AUC:", round(auc_val, 3), "\n")
+cat("Accuracy:", round(accuracy, 3), "\n")
+cat("Sensitivity:", round(sensitivity, 3), "\n")
+cat("Specificity:", round(specificity, 3), "\n")
+cat("Brier score:", round(brier, 4), "\n")
+cat("Null Brier:", round(null_brier, 4), "\n")
+```
+
+NOTES:
+
+Stratified 70/30 split preserving class balance
+Fitted logistic regression with all 23 predictors (no selection yet)
+Evaluated with confusion matrix, sensitivity, specificity, AUC, Brier score, and calibration curve 
+Added null Brier score as a reference — any useful model must beat this
+
+Logistic regression is the natural baseline for binary outcomes
+Odds ratios make it interpretable (IDH1 OR will be very large)
+AUC measures discrimination; Brier score measures probability accuracy
+Calibration tells us whether probabilities are trustworthy (this mattersclinically)
+
+
+Apply lasso and ridge regularisation
