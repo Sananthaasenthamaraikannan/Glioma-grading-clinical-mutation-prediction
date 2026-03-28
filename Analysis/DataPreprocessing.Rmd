@@ -1,0 +1,228 @@
+---
+title: "Data Preprocessing"
+author: "Sananthaa J S"
+date: "2026-03-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(gtsummary)
+library(ggplot2)
+library(patchwork)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+#load data
+df <- read.csv("D:/Giloma Grading Mutation Prediction/Glioma-grading-clinical-mutation-prediction/DATA/glioma+grading+clinical+and+mutation+features+dataset/TCGA_InfoWithGrade.csv")
+dim(df)         
+names(df)       
+
+```
+
+Study Description:
+Source:      The Cancer Genome Atlas (TCGA) Research Network
+Study type:  Cross-sectional, retrospective observational study
+Population:  Adult patients with confirmed glioma (LGG or GBM)
+Raw n:       862 observations in TCGA_GBM_LGG_Mutations_all.csv
+Preprocessed n: 839 (23 rows removed — records where Gender, Age_at_diagnosis,or Race were recorded as '--' or 'not reported' in the raw file)
+Reference:   Tasci et al. (2022), Int. J. Mol. Sci., doi:10.3390/ijms232214155
+
+Variable Description:
+
+Outcome:
+Grade             integer  0 = LGG (low-grade glioma), 1 = GBM (glioblastoma)
+
+Clinical predictors:
+Age_at_diagnosis  numeric  years (continuous, e.g. 38.72)
+Gender            integer  0 = Male, 1 = Female
+Race              integer  0 = White, 1 = Black/African American,2 = Asian, 3 = American Indian/Alaska Native
+
+Molecular predictors (20 binary mutation features):
+IDH1, TP53, ATRX, PTEN, EGFR, CIC, MUC16, PIK3CA, NF1, PIK3R1,
+FUBP1, RB1, NOTCH1, BCOR, CSMD3, SMARCA4, GRIN2A, IDH2, FAT4, PDGFRA
+Each: 1 = MUTATED, 0 = NOT_MUTATED (wild-type)
+
+
+```{r}
+df <- df %>%
+  mutate(
+    Grade_f  = factor(Grade,  levels = c(0, 1), labels = c("LGG", "GBM")),
+    Gender_f = factor(Gender, levels = c(0, 1), labels = c("Male", "Female")),
+    Race_f   = factor(Race,
+                      levels = c(0, 1, 2, 3),
+                      labels = c("White", "Black/African American",
+                                 "Asian", "American Indian/Alaska Native"))
+  )
+```
+
+```{r}
+cat("\n=== Missing values per variable ===\n")
+colSums(is.na(df))
+```
+All zeros — missingness was handled at preprocessing (removal of '--' rows)
+```{r}
+cat("\n=== Outcome (Grade) distribution ===\n")
+table(df$Grade_f)
+prop.table(table(df$Grade_f)) * 100
+```
+Mild imbalance, no resampling applied
+```{r}
+clinical_vars <- c("Age_at_diagnosis", "Gender_f", "Race_f")
+ 
+tbl_summary_clinical <- df %>%
+  select(all_of(clinical_vars), Grade_f) %>%
+  tbl_summary(
+    by = Grade_f,
+    label = list(
+      Age_at_diagnosis ~ "Age at diagnosis (years)",
+      Gender_f         ~ "Gender",
+      Race_f           ~ "Race/ethnicity"
+    ),
+    statistic = list(
+      all_continuous()  ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = all_continuous() ~ 1
+  ) %>%
+  add_overall() %>%
+  add_p(
+    test = list(
+      Age_at_diagnosis ~ "t.test",
+      Gender_f         ~ "chisq.test",
+      Race_f           ~ "chisq.test"
+    )
+  ) %>%
+  bold_labels() %>%
+  modify_caption("**Table 1. Clinical characteristics stratified by glioma grade**")
+ 
+tbl_summary_clinical
+```
+
+```{r}
+mut_genes <- c("IDH1","TP53","ATRX","PTEN","EGFR","CIC","MUC16","PIK3CA",
+               "NF1","PIK3R1","FUBP1","RB1","NOTCH1","BCOR","CSMD3",
+               "SMARCA4","GRIN2A","IDH2","FAT4","PDGFRA")
+ 
+lgg_df <- df %>% filter(Grade == 0)
+gbm_df <- df %>% filter(Grade == 1)
+ 
+mut_table <- tibble(
+  Gene    = mut_genes,
+  Overall = round(colMeans(df[, mut_genes]) * 100, 1),
+  LGG     = round(colMeans(lgg_df[, mut_genes]) * 100, 1),
+  GBM     = round(colMeans(gbm_df[, mut_genes]) * 100, 1)
+) %>%
+  mutate(
+    Difference = GBM - LGG,                      # positive = enriched in GBM
+    Direction  = ifelse(Difference > 0, "GBM-enriched", "LGG-enriched")
+  ) %>%
+  arrange(desc(abs(Difference)))                  # sort by magnitude of difference
+ 
+cat("\n=== Mutation frequencies (%) by grade ===\n")
+print(mut_table, n = 20)
+```
+
+```{r}
+#class distribution
+ggplot(df, aes(x = Grade_f, fill = Grade_f)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.4) +
+  scale_fill_manual(values = c("LGG" = "#3B8BD4", "GBM" = "#E24B4A")) +
+  labs(title = "Class distribution", x = "Grade", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+```{r}
+#Age separation between grades
+ggplot(df, aes(x = Age_at_diagnosis, fill = Grade_f)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values = c("LGG" = "#3B8BD4", "GBM" = "#E24B4A")) +
+  labs(title = "Age at diagnosis by grade", x = "Age (years)", y = "Density") +
+  theme_minimal()
+```
+
+```{r}
+#Mutation frequencies before modelling
+mut_table %>%
+  pivot_longer(c(LGG, GBM), names_to = "Grade", values_to = "Pct") %>%
+  mutate(Gene = factor(Gene, levels = mut_table$Gene)) %>%
+  ggplot(aes(x = Pct, y = Gene, colour = Grade)) +
+  geom_line(aes(group = Gene), colour = "grey70") +
+  geom_point(size = 3) +
+  scale_colour_manual(values = c("LGG" = "#3B8BD4", "GBM" = "#E24B4A")) +
+  labs(title = "Mutation frequency by grade", x = "% mutated", y = NULL) +
+  theme_minimal()
+```
+
+```{r}
+cat("\n Summary Statistics \n")
+cat("Total observations (preprocessed):", nrow(df), "\n")
+cat("Rows removed from raw (862 - 839):", 862 - nrow(df), "\n")
+cat("Outcome — LGG (0):", sum(df$Grade == 0),
+    sprintf("(%.1f%%)", mean(df$Grade == 0) * 100), "\n")
+cat("Outcome — GBM (1):", sum(df$Grade == 1),
+    sprintf("(%.1f%%)", mean(df$Grade == 1) * 100), "\n")
+cat("Age — mean (SD):",
+    round(mean(df$Age_at_diagnosis), 1), "(", round(sd(df$Age_at_diagnosis), 1), ")\n")
+cat("Age — LGG mean:", round(mean(lgg_df$Age_at_diagnosis), 1), "\n")
+cat("Age — GBM mean:", round(mean(gbm_df$Age_at_diagnosis), 1), "\n")
+cat("Gender — Male:", sum(df$Gender == 0),
+    sprintf("(%.1f%%)", mean(df$Gender == 0) * 100), "\n")
+cat("Gender — Female:", sum(df$Gender == 1),
+    sprintf("(%.1f%%)", mean(df$Gender == 1) * 100), "\n")
+ 
+cat("\nMost discriminating mutations (|LGG% - GBM%| >= 15pp):\n")
+mut_table %>%
+  filter(abs(Difference) >= 15) %>%
+  select(Gene, LGG, GBM, Difference, Direction) %>%
+  print()
+ 
+cat("\nMutation with near-zero discrimination (|diff| < 3pp):\n")
+mut_table %>%
+  filter(abs(Difference) < 3) %>%
+  select(Gene, Overall, LGG, GBM, Difference) %>%
+  print()
+ 
+```
+
+Loaded the preprocessed TCGA encoded file (n=839, 24 columns)
+Raw file had 862 rows — 23 removed because Gender, Age, or Race were recorded as '--' or 'not reported' (complete case analysis, MCAR assumed) (only 2.7% of rows were removed)
+
+EDA
+
+AGE
+LGG mean age 43.9 vs GBM mean age 60.7 — 17-year gap, p<0.001
+Age will likely be one of the strongest predictors in the model
+Visible as two clearly separated density curves
+
+Gender
+56% male in LGG, 62% male in GBM, p=0.10 — not significant
+Gender probably adds little but include it and let regularisation decide
+
+Race
+p=0.003 but 91% of the cohort is white (765/839)
+Statistically significant but clinically uninterpretable due to lack of diversity
+Flag as a limitation in discussion
+
+Mutations
+IDH1 is the dominant discriminator: 78.2% mutated in LGG vs 6.5% in GBM
+Other strong LGG markers: ATRX (37.6% vs 9.7%), CIC (22.0% vs 1.1%)
+Strong GBM markers: PTEN (5.1% vs 33.0%), EGFR (6.4% vs 23.0%)
+Near-zero discrimination: BCOR, PIK3CA, FAT4 — lasso may shrink these to zero
+IDH1 dominance is a known biological fact, not an artefact
+
+
+Bar chart - class imbalance (LGG=487, GBM=352) — mild, no resampling needed
+Density plot - age separation by grade — motivates age as a key predictor
+Dot plot - mutation frequencies LGG vs GBM — tells the biological story before any model is built
+
+Should Split data 70/30 stratified by Grade and Fit logistic regression with all 23 predictors as baseline
