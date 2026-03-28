@@ -1,0 +1,192 @@
+---
+title: "Regularisation"
+author: "Sananthaa J S"
+date: "2026-03-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(glmnet)
+library(pROC)     
+library(rms) 
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r }
+df <- read.csv("D:/Giloma Grading Mutation Prediction/Glioma-grading-clinical-mutation-prediction/DATA/glioma+grading+clinical+and+mutation+features+dataset/TCGA_InfoWithGrade.csv")
+
+df <- df %>%
+  mutate(
+    Grade_f = factor(Grade, levels = c(0, 1), labels = c("LGG", "GBM"))
+  )
+
+set.seed(123)
+train_idx <- c(
+  sample(which(df$Grade == 0), size = round(0.7 * sum(df$Grade == 0))),
+  sample(which(df$Grade == 1), size = round(0.7 * sum(df$Grade == 1)))
+)
+train <- df[train_idx, ]
+test  <- df[-train_idx, ]
+
+cat("Train:", nrow(train), "| Test:", nrow(test), "\n")
+```
+
+```{r }
+predictors <- c("Age_at_diagnosis", "Gender", "Race",
+                "IDH1","TP53","ATRX","PTEN","EGFR","CIC","MUC16","PIK3CA",
+                "NF1","PIK3R1","FUBP1","RB1","NOTCH1","BCOR","CSMD3",
+                "SMARCA4","GRIN2A","IDH2","FAT4","PDGFRA")
+
+X_train <- as.matrix(train[, predictors])
+X_test  <- as.matrix(test[,  predictors])
+y_train <- train$Grade
+y_test  <- test$Grade
+```
+
+
+```{r }
+set.seed(123)
+cv_lasso <- cv.glmnet(X_train, y_train,
+                      alpha  = 1,
+                      family = "binomial",
+                      nfolds = 10)
+
+plot(cv_lasso)
+title("Lasso: cross-validation curve", line = 2.5)
+
+cat("Best lambda (min):", round(cv_lasso$lambda.min, 4), "\n")
+cat("Best lambda (1se):", round(cv_lasso$lambda.1se, 4), "\n")
+```
+
+```{r }
+lasso_coefs <- coef(cv_lasso, s = "lambda.min")
+lasso_df    <- data.frame(
+  Predictor   = rownames(lasso_coefs),
+  Coefficient = as.numeric(lasso_coefs)
+) %>%
+  filter(Predictor != "(Intercept)") %>%
+  arrange(Coefficient)
+
+cat("REMOVED by lasso\n")
+lasso_df %>% filter(Coefficient == 0) %>% pull(Predictor) %>% print()
+
+cat("Features KEPT by lasso")
+lasso_df %>% filter(Coefficient != 0) %>% print()
+```
+#lasso path
+```{r }
+lasso_path <- glmnet(X_train, y_train, alpha = 1, family = "binomial")
+plot(lasso_path, xvar = "lambda", label = TRUE)
+title("Lasso coefficient path", line = 2.5)
+```
+
+```{r }
+set.seed(123)
+cv_ridge <- cv.glmnet(X_train, y_train,
+                      alpha  = 0,
+                      family = "binomial",
+                      nfolds = 10)
+
+plot(cv_ridge)
+title("Ridge: cross-validation curve", line = 2.5)
+
+cat("Best lambda (min):", round(cv_ridge$lambda.min, 4), "\n")
+```
+
+#test predict
+
+```{r }
+pred_lasso <- predict(cv_lasso, newx = X_test,
+                      s = "lambda.min", type = "response")[, 1]
+
+pred_ridge <- predict(cv_ridge, newx = X_test,
+                      s = "lambda.min", type = "response")[, 1]
+```
+
+#Eval
+```{r }
+auc_lasso <- auc(roc(y_test, pred_lasso))
+auc_ridge <- auc(roc(y_test, pred_ridge))
+
+cat("Lasso AUC:", round(auc_lasso, 3), "\n")
+cat("Ridge AUC:", round(auc_ridge, 3), "\n")
+
+brier_lasso <- mean((pred_lasso - y_test)^2)
+brier_ridge <- mean((pred_ridge - y_test)^2)
+
+cat("Lasso Brier:", round(brier_lasso, 4), "\n")
+cat("Ridge Brier:", round(brier_ridge, 4), "\n")
+
+pred_lasso_class <- ifelse(pred_lasso >= 0.5, 1, 0)
+conf_lasso <- table(Predicted = pred_lasso_class, Actual = y_test)
+sens_lasso <- conf_lasso[2,2] / (conf_lasso[2,2] + conf_lasso[1,2])
+spec_lasso <- conf_lasso[1,1] / (conf_lasso[1,1] + conf_lasso[2,1])
+
+cat("\nLasso sensitivity:", round(sens_lasso, 3), "\n")
+cat("Lasso specificity:", round(spec_lasso, 3), "\n")
+
+pred_ridge_class <- ifelse(pred_ridge >= 0.5, 1, 0)
+conf_ridge <- table(Predicted = pred_ridge_class, Actual = y_test)
+sens_ridge <- conf_ridge[2,2] / (conf_ridge[2,2] + conf_ridge[1,2])
+spec_ridge <- conf_ridge[1,1] / (conf_ridge[1,1] + conf_ridge[2,1])
+
+cat("Ridge sensitivity:", round(sens_ridge, 3), "\n")
+cat("Ridge specificity:", round(spec_ridge, 3), "\n")
+```
+
+#ROC
+```{r }
+roc_lasso <- roc(y_test, pred_lasso)
+roc_ridge <- roc(y_test, pred_ridge)
+
+plot(roc_lasso, col = "#3B8BD4", lwd = 2,
+     main = "ROC curves — lasso vs ridge")
+lines(roc_ridge, col = "#E24B4A", lwd = 2)
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+legend("bottomright",
+       legend = c(paste0("Lasso (AUC=", round(auc_lasso, 3), ")"),
+                  paste0("Ridge (AUC=", round(auc_ridge, 3), ")")),
+       col = c("#3B8BD4", "#E24B4A"), lwd = 2)
+```
+
+```{r }
+# lasso calibration
+val.prob(pred_lasso, y_test)
+title("Calibration lasso", line = 0.5)
+
+# ridge calibration
+val.prob(pred_ridge, y_test)
+title("Calibration ridge", line = 0.5)
+```
+#Compare
+```{r }
+auc_lr    <- 0.929
+brier_lr  <- 0.0948
+slope_lr  <- 0.962
+
+slope_lasso <-1.056
+slope_ridge <- 1.387   
+
+comparison <- tibble(
+  Model           = c("Logistic regression", "Lasso", "Ridge"),
+  AUC             = c(auc_lr,    round(auc_lasso, 3), round(auc_ridge, 3)),
+  Brier_score     = c(brier_lr,  round(brier_lasso, 4), round(brier_ridge, 4)),
+  Cal_slope       = c(slope_lr,  slope_lasso, slope_ridge),
+  Sensitivity     = c(0.915,     round(sens_lasso, 3), round(sens_ridge, 3)),
+  Specificity     = c(0.877,     round(spec_lasso, 3), round(spec_ridge, 3))
+)
+
+print(comparison)
+```
+NOTES
+
+Random forest — tree-based, no linearity assumption
+Compare against all three linear models built so far
+Expect RF to have higher AUC but potentially worse calibration
