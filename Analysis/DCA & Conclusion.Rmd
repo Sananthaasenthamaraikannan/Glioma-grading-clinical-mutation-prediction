@@ -1,0 +1,191 @@
+---
+title: "DCA"
+author: "Sananthaa J S"
+date: "2026-03-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(glmnet)
+library(randomForest)
+library(dcurves) 
+```
+
+```{r }
+df <- read.csv("D:/Giloma Grading Mutation Prediction/Glioma-grading-clinical-mutation-prediction/DATA/glioma+grading+clinical+and+mutation+features+dataset/TCGA_InfoWithGrade.csv")
+df <- df %>%
+  mutate(Grade_f = factor(Grade, levels = c(0,1), labels = c("LGG","GBM")))
+
+set.seed(123)
+train_idx <- c(
+  sample(which(df$Grade == 0), size = round(0.7 * sum(df$Grade == 0))),
+  sample(which(df$Grade == 1), size = round(0.7 * sum(df$Grade == 1)))
+)
+train <- df[train_idx, ]
+test  <- df[-train_idx, ]
+
+predictors <- c("Age_at_diagnosis","Gender","Race",
+                "IDH1","TP53","ATRX","PTEN","EGFR","CIC","MUC16","PIK3CA",
+                "NF1","PIK3R1","FUBP1","RB1","NOTCH1","BCOR","CSMD3",
+                "SMARCA4","GRIN2A","IDH2","FAT4","PDGFRA")
+
+X_train <- as.matrix(train[, predictors])
+X_test  <- as.matrix(test[,  predictors])
+
+# plain logistic regression
+model_lr <- glm(Grade ~ ., data = train[, c("Grade", predictors)],
+                family = binomial)
+
+# lasso
+set.seed(123)
+cv_lasso <- cv.glmnet(X_train, as.numeric(train$Grade),
+                      alpha=1, family="binomial", nfolds=10)
+
+# random forest
+set.seed(123)
+model_rf <- randomForest(Grade_f ~ .,
+                         data      = train[, c("Grade_f", predictors)],
+                         ntree     = 500,
+                         importance= TRUE)
+
+cat("Models fitted.\n")
+```
+
+```{r }
+test$pred_lr    <- predict(model_lr,  newdata = test,  type = "response")
+test$pred_lasso <- predict(cv_lasso,  newx    = X_test,
+                           s = "lambda.min", type = "response")[,1]
+test$pred_rf    <- predict(model_rf,  newdata = test,  type = "prob")[,"GBM"]
+```
+
+```{r }
+dca_result <- dca(
+  Grade ~ pred_lr + pred_lasso + pred_rf,
+  data       = test,
+  thresholds = seq(0, 0.9, by = 0.01),
+  label      = list(
+    pred_lr    = "Logistic regression",
+    pred_lasso = "Lasso",
+    pred_rf    = "Random Forest"
+  )
+)
+
+plot(dca_result,
+     smooth = TRUE) +
+  labs(
+    title    = "Decision curve analysis",
+    subtitle = "Net benefit across probability thresholds",
+    x        = "Probability threshold",
+    y        = "Net benefit"
+  ) +
+  theme_minimal() +
+  coord_cartesian(ylim = c(-0.05, 0.5))
+```
+
+```{r }
+nb_data <- dca_result$dca
+key_thresholds <- c(0.20, 0.30, 0.40, 0.50)
+
+nb_table <- nb_data %>%
+  filter(threshold %in% key_thresholds) %>%
+  select(label, threshold, net_benefit) %>%
+  mutate(net_benefit = round(net_benefit, 3)) %>%
+  pivot_wider(names_from = label, values_from = net_benefit)
+
+print(nb_table)
+```
+
+```{r }
+prevalence <- mean(test$Grade)
+cat("GBM prevalence in test set:", round(prevalence, 3), "\n")
+cat("At threshold = 0.3, a clinician treats patients predicted as GBM\n")
+cat("with probability >= 30%.\n\n")
+
+cat("Treat-all net benefit at threshold 0.3:\n")
+nb_data %>%
+  filter(label == "Treat All") %>%
+  filter(round(threshold, 2) == 0.30) %>%
+  pull(net_benefit) %>%
+  round(3) %>%
+  cat("\n")
+
+cat("Logistic regression net benefit at threshold 0.3:\n")
+nb_data %>%
+  filter(label == "Logistic regression", abs(threshold - 0.3) < 0.001) %>%
+  pull(net_benefit) %>%
+  round(3) %>%
+  cat("\n")
+```
+
+#Discussion
+
+#DCA shows
+At threshold 0.3 — where a clinician treats any patient with a predicted
+GBM probability of 30% or more — all three models provide a net benefit
+of approximately 0.353, compared to 0.172 for treat-all and 0 for
+treat-none. This means the model more than doubles the net benefit of
+the naive strategy of treating everyone.
+
+At threshold 0.5, treat-all has negative net benefit (-0.159) because
+the GBM prevalence (42%) is below the threshold — treating everyone
+causes more harm than good. All three models remain strongly positive
+at 0.313, confirming genuine clinical value at stricter thresholds.
+
+A model is only clinically useful if it improves decisions relative to available alternatives. 
+High AUC alone does not guarantee this. DCA is the formal framework for testing clinical utility,
+and it is what separates a statistically good model from a clinically useful one.
+
+#calibration
+
+Well-calibrated models tend to perform better on DCA because net benefit
+depends on accurate probabilities, not just rankings. Logistic regression
+had the best calibration slope (0.962) among all models, and this likely
+contributes to its strong DCA performance.
+
+#Comparison to Research paper by Tasci et al 
+
+Tasci et al. (2022) reported accuracy, AUC, F1, precision, recall, and
+specificity for their 16-combination voting ensemble. They did not conduct
+decision curve analysis or report calibration metrics. Their best TCGA
+accuracy was 0.876 using SVM + RF + AdaBoost.
+
+This project achieves:
+- Accuracy 0.893 with plain logistic regression — simpler model,
+  better performance
+- AUC 0.929 vs their 0.914
+- Calibration slope 0.962 — not reported by Tasci et al.
+- DCA net benefit 0.353 at threshold 0.3 — not reported by Tasci et al.
+
+The key methodological distinction is framing. Tasci et al. treated
+glioma grading as a classification problem and optimised accuracy.
+This project treats it as a probability estimation problem — consistent
+with §7 and §11 — and goes further by evaluating whether the model
+is clinically useful, consistent with §12.
+
+#Limitations
+
+1. No external validation — Tasci et al. validated on CGGA (n=286) and
+   performance dropped from 0.876 to 0.797. This project used only TCGA.
+   External validation on CGGA would be the most important next step.
+
+2. IDH1 dominance — the model is essentially a weighted IDH1 test with
+   age adjustment. An IDH1 ablation experiment (refit without IDH1)
+   would quantify how much the other predictors contribute.
+
+3. Binary mutation features — no information about mutation type or
+   allele frequency. Richer molecular data might improve performance.
+
+4. Limited racial diversity — 91% white cohort. The model may not
+   generalise to more diverse populations.
+
+#Conclusion
+
+A plain logistic regression, evaluated with calibration and decision
+curve analysis, matches the performance of a complex 16-combination
+voting ensemble from the literature — and goes further by demonstrating
+genuine clinical utility that the paper never assessed. All three models
+provide net benefit over treat-all across the full 0.2 to 0.5 threshold
+range, confirming that molecular and clinical features from TCGA can
+support clinically useful glioma grading predictions.

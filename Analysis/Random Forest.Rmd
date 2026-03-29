@@ -1,0 +1,182 @@
+---
+title: "Random Forest"
+author: "Sananthaa J S"
+date: "2026-03-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(randomForest)  
+library(pROC)          
+library(rms)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+df <- read.csv("D:/Giloma Grading Mutation Prediction/Glioma-grading-clinical-mutation-prediction/DATA/glioma+grading+clinical+and+mutation+features+dataset/TCGA_InfoWithGrade.csv")
+
+df <- df %>%
+  mutate(
+    Grade_f = factor(Grade, levels = c(0, 1), labels = c("LGG", "GBM"))
+  )
+
+# identical split to Stages 2 and 3
+set.seed(123)
+train_idx <- c(
+  sample(which(df$Grade == 0), size = round(0.7 * sum(df$Grade == 0))),
+  sample(which(df$Grade == 1), size = round(0.7 * sum(df$Grade == 1)))
+)
+train <- df[train_idx, ]
+test  <- df[-train_idx, ]
+
+cat("Train:", nrow(train), "| Test:", nrow(test), "\n")
+```
+
+#predict Grade_f (factor) so randomForest returns class probabilities.
+
+```{r }
+set.seed(123)
+model_rf <- randomForest(
+  Grade_f ~ Age_at_diagnosis + Gender + Race +
+            IDH1 + TP53 + ATRX + PTEN + EGFR + CIC + MUC16 + PIK3CA +
+            NF1 + PIK3R1 + FUBP1 + RB1 + NOTCH1 + BCOR + CSMD3 +
+            SMARCA4 + GRIN2A + IDH2 + FAT4 + PDGFRA,
+  data       = train,
+  ntree      = 500,
+  importance = TRUE
+)
+
+print(model_rf)
+```
+
+```{r }
+# extract and sort
+imp_df <- data.frame(
+  Gene       = rownames(importance(model_rf)),
+  Importance = importance(model_rf)[, "MeanDecreaseGini"]
+) %>%
+  arrange(desc(Importance))
+
+print(imp_df)
+
+# plot
+ggplot(imp_df, aes(x = Importance,
+                   y = reorder(Gene, Importance))) +
+  geom_col(fill = "#3B8BD4") +
+  labs(title    = "Variable importance — Random Forest",
+       subtitle = "MeanDecreaseGini — higher = more important",
+       x = "Mean decrease in Gini", y = NULL) +
+  theme_minimal()
+```
+
+
+```{r }
+pred_rf_prob  <- predict(model_rf, newdata = test, type = "prob")[, "GBM"]
+pred_rf_class <- predict(model_rf, newdata = test, type = "class")
+
+# confusion matrix
+conf_rf <- table(Predicted = pred_rf_class, Actual = test$Grade_f)
+print(conf_rf)
+
+TP <- conf_rf["GBM", "GBM"]
+TN <- conf_rf["LGG", "LGG"]
+FP <- conf_rf["GBM", "LGG"]
+FN <- conf_rf["LGG", "GBM"]
+
+acc_rf  <- (TP + TN) / sum(conf_rf)
+sens_rf <- TP / (TP + FN)
+spec_rf <- TN / (TN + FP)
+
+cat("Accuracy:   ", round(acc_rf,  3), "\n")
+cat("Sensitivity:", round(sens_rf, 3), "\n")
+cat("Specificity:", round(spec_rf, 3), "\n")
+```
+
+```{r }
+auc_rf   <- auc(roc(test$Grade, pred_rf_prob))
+brier_rf <- mean((pred_rf_prob - test$Grade)^2)
+
+cat("AUC:        ", round(auc_rf,   3), "\n")
+cat("Brier score:", round(brier_rf, 4), "\n")
+```
+
+```{r }
+roc_rf <- roc(test$Grade, pred_rf_prob)
+
+plot(roc_rf,
+     col  = "#1D9E75",
+     lwd  = 2,
+     main = paste0("ROC curve — Random Forest (AUC = ",
+                   round(auc_rf, 3), ")"))
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+```
+
+```{r }
+val.prob(pred_rf_prob, test$Grade)
+title("Calibration — Random Forest (uncalibrated)", line = 0.5)
+```
+
+```{r }
+# fit a logistic regression on RF probabilities using training set
+train_rf_prob <- predict(model_rf, newdata = train, type = "prob")[, "GBM"]
+
+platt_model <- glm(Grade ~ train_rf_prob,
+                   data   = data.frame(Grade        = train$Grade,
+                                       train_rf_prob = train_rf_prob),
+                   family = binomial)
+
+# apply to test set
+pred_rf_calibrated <- predict(platt_model,
+                               newdata = data.frame(train_rf_prob = pred_rf_prob),
+                               type    = "response")
+
+# recalculate Brier after calibration
+brier_rf_cal <- mean((pred_rf_calibrated - test$Grade)^2)
+auc_rf_cal   <- auc(roc(test$Grade, pred_rf_calibrated))
+
+cat("After Platt scaling:\n")
+cat("AUC:        ", round(auc_rf_cal,   3), "\n")
+cat("Brier score:", round(brier_rf_cal, 4), "\n")
+
+# calibration after Platt scaling
+val.prob(pred_rf_calibrated, test$Grade)
+title("Calibration — Random Forest (Platt scaled)", line = 0.5)
+```
+
+```{r }
+# calibration slopes — fill in from val.prob plots above
+slope_rf       <- 0.864   # from uncalibrated RF calibration plot
+slope_rf_platt <- 0.741  # from Platt-scaled calibration plot
+
+comparison <- tibble(
+  Model       = c("Logistic regression", "Lasso", "Ridge",
+                  "Random Forest", "RF + Platt scaling"),
+  AUC         = c(0.929, 0.914, 0.926,
+                  round(auc_rf, 3), round(auc_rf_cal, 3)),
+  Brier_score = c(0.0948, 0.1002, 0.0983,
+                  round(brier_rf, 4), round(brier_rf_cal, 4)),
+  Cal_slope   = c(0.962, 1.056, 1.387,
+                  slope_rf, slope_rf_platt),
+  Sensitivity = c(0.915, 0.925, 0.934,
+                  round(sens_rf, 3), NA),
+  Specificity = c(0.877, 0.849, 0.870,
+                  round(spec_rf, 3), NA)
+)
+
+print(comparison)
+```
+NOTES
+
+RF makes no linearity assumptions — can capture IDH1 × age interactions
+Variable importance plot: does RF agree with logistic regression on which predictors matter most?
+RF typically has high AUC but poor calibration — the slope will likely be far from 1
+Platt scaling is a simple fix — one logistic regression on top of RF probabilities — show before vs after calibration slope
+Key question: does RF beat AUC=0.929 from plain logistic regression?
+If not, the simpler model wins

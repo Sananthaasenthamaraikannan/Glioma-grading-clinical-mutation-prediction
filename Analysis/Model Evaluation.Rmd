@@ -1,0 +1,244 @@
+---
+title: "Model Evaluation"
+author: "Sananthaa J S"
+date: "2026-03-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(glmnet)
+library(randomForest)
+library(pROC)
+library(rms)
+```
+
+
+```{r }
+df <- read.csv("D:/Giloma Grading Mutation Prediction/Glioma-grading-clinical-mutation-prediction/DATA/glioma+grading+clinical+and+mutation+features+dataset/TCGA_InfoWithGrade.csv")
+df <- df %>%
+  mutate(Grade_f = factor(Grade, levels = c(0,1), labels = c("LGG","GBM")))
+
+set.seed(123)
+train_idx <- c(
+  sample(which(df$Grade == 0), size = round(0.7 * sum(df$Grade == 0))),
+  sample(which(df$Grade == 1), size = round(0.7 * sum(df$Grade == 1)))
+)
+train <- df[train_idx, ]
+test  <- df[-train_idx, ]
+
+predictors <- c("Age_at_diagnosis","Gender","Race",
+                "IDH1","TP53","ATRX","PTEN","EGFR","CIC","MUC16","PIK3CA",
+                "NF1","PIK3R1","FUBP1","RB1","NOTCH1","BCOR","CSMD3",
+                "SMARCA4","GRIN2A","IDH2","FAT4","PDGFRA")
+
+X_train <- as.matrix(train[, predictors])
+X_test  <- as.matrix(test[,  predictors])
+y_train <- train$Grade
+y_test  <- test$Grade
+
+# plain logistic regression
+model_lr  <- glm(Grade ~ ., data = train[, c("Grade", predictors)],
+                 family = binomial)
+
+# lasso
+set.seed(123)
+cv_lasso  <- cv.glmnet(X_train, y_train, alpha=1,
+                       family="binomial", nfolds=10)
+
+# ridge
+set.seed(123)
+cv_ridge  <- cv.glmnet(X_train, y_train, alpha=0,
+                       family="binomial", nfolds=10)
+
+# random forest
+set.seed(123)
+model_rf  <- randomForest(Grade_f ~ ., 
+                          data      = train[, c("Grade_f", predictors)],
+                          ntree     = 500,
+                          importance= TRUE)
+
+cat("All models fitted.\n")
+```
+
+```{r }
+pred_lr    <- predict(model_lr,  newdata = test,   type = "response")
+pred_lasso <- predict(cv_lasso,  newx    = X_test,
+                      s = "lambda.min", type = "response")[,1]
+pred_ridge <- predict(cv_ridge,  newx    = X_test,
+                      s = "lambda.min", type = "response")[,1]
+pred_rf    <- predict(model_rf,  newdata = test,   type = "prob")[,"GBM"]
+```
+
+
+```{r }
+# training predictions
+pred_lr_train    <- predict(model_lr, newdata = train, type = "response")
+pred_lasso_train <- predict(cv_lasso, newx = X_train,
+                            s = "lambda.min", type = "response")[,1]
+pred_ridge_train <- predict(cv_ridge, newx = X_train,
+                            s = "lambda.min", type = "response")[,1]
+pred_rf_train    <- predict(model_rf, newdata = train, type = "prob")[,"GBM"]
+
+auc_lr_train    <- auc(roc(y_train, pred_lr_train))
+auc_lasso_train <- auc(roc(y_train, pred_lasso_train))
+auc_ridge_train <- auc(roc(y_train, pred_ridge_train))
+auc_rf_train    <- auc(roc(y_train, as.numeric(pred_rf_train)))
+
+auc_lr_test     <- auc(roc(y_test, pred_lr))
+auc_lasso_test  <- auc(roc(y_test, pred_lasso))
+auc_ridge_test  <- auc(roc(y_test, pred_ridge))
+auc_rf_test     <- auc(roc(y_test, pred_rf))
+
+overfit_table <- tibble(
+  Model        = c("Logistic regression","Lasso","Ridge","Random Forest"),
+  Train_AUC    = round(c(auc_lr_train, auc_lasso_train,
+                         auc_ridge_train, auc_rf_train), 3),
+  Test_AUC     = round(c(auc_lr_test, auc_lasso_test,
+                         auc_ridge_test, auc_rf_test),  3),
+  Gap          = round(Train_AUC - Test_AUC, 3)
+)
+
+print(overfit_table)
+```
+
+```{r }
+get_metrics <- function(prob, actual, threshold) {
+  pred  <- ifelse(prob >= threshold, 1, 0)
+  TP    <- sum(pred == 1 & actual == 1)
+  TN    <- sum(pred == 0 & actual == 0)
+  FP    <- sum(pred == 1 & actual == 0)
+  FN    <- sum(pred == 0 & actual == 1)
+  list(
+    sensitivity = TP / (TP + FN),
+    specificity = TN / (TN + FP),
+    accuracy    = (TP + TN) / length(actual)
+  )
+}
+```
+
+
+```{r }
+models <- list(
+  "Logistic regression" = pred_lr,
+  "Lasso"               = pred_lasso,
+  "Ridge"               = pred_ridge,
+  "Random Forest"       = pred_rf
+)
+
+# metrics at both thresholds
+results_05 <- map_dfr(names(models), function(m) {
+  mt <- get_metrics(models[[m]], y_test, 0.5)
+  tibble(Model = m, Threshold = 0.5,
+         Sensitivity = round(mt$sensitivity, 3),
+         Specificity = round(mt$specificity, 3),
+         Accuracy    = round(mt$accuracy,    3))
+})
+
+results_03 <- map_dfr(names(models), function(m) {
+  mt <- get_metrics(models[[m]], y_test, 0.3)
+  tibble(Model = m, Threshold = 0.3,
+         Sensitivity = round(mt$sensitivity, 3),
+         Specificity = round(mt$specificity, 3),
+         Accuracy    = round(mt$accuracy,    3))
+})
+
+cat("=== Threshold = 0.5 (default) ===\n")
+print(results_05)
+cat("\n=== Threshold = 0.3 (clinical — prioritise sensitivity) ===\n")
+print(results_03)
+```
+
+```{r brier}
+brier <- tibble(
+  Model       = names(models),
+  Brier_score = round(map_dbl(models, ~ mean((.x - y_test)^2)), 4)
+)
+print(brier)
+```
+
+```{r }
+get_cal <- function(prob, actual) {
+  fit <- val.prob(prob, actual, pl = FALSE)
+  list(slope = round(fit["Slope"], 3),
+       intercept = round(fit["Intercept"], 3))
+}
+
+cal_lr    <- get_cal(pred_lr,    y_test)
+cal_lasso <- get_cal(pred_lasso, y_test)
+cal_ridge <- get_cal(pred_ridge, y_test)
+cal_rf    <- get_cal(pred_rf,    y_test)
+
+cal_table <- tibble(
+  Model     = names(models),
+  Cal_slope = c(cal_lr$slope, cal_lasso$slope,
+                cal_ridge$slope, cal_rf$slope),
+  Cal_intercept = c(cal_lr$intercept, cal_lasso$intercept,
+                    cal_ridge$intercept, cal_rf$intercept)
+)
+print(cal_table)
+```
+
+---
+
+## 8. Final comparison table — §11, §13
+
+```{r final_table}
+final_table <- tibble(
+  Model       = names(models),
+  AUC         = round(c(auc_lr_test, auc_lasso_test,
+                        auc_ridge_test, auc_rf_test), 3),
+  Brier       = brier$Brier_score,
+  Cal_slope   = cal_table$Cal_slope,
+  Cal_int     = cal_table$Cal_intercept,
+  Sens_05     = results_05$Sensitivity,
+  Spec_05     = results_05$Specificity,
+  Sens_03     = results_03$Sensitivity,
+  Spec_03     = results_03$Specificity
+)
+
+print(final_table)
+```
+
+---
+
+## 9. Overlaid ROC curves — all four models — §7
+
+```{r roc_overlay}
+roc_lr    <- roc(y_test, pred_lr)
+roc_lasso <- roc(y_test, pred_lasso)
+roc_ridge <- roc(y_test, pred_ridge)
+roc_rf    <- roc(y_test, pred_rf)
+
+plot(roc_lr,
+     col  = "#3B8BD4", lwd = 2,
+     main = "ROC curves — all models")
+lines(roc_lasso, col = "#E24B4A",  lwd = 2)
+lines(roc_ridge, col = "#EF9F27",  lwd = 2)
+lines(roc_rf,    col = "#1D9E75",  lwd = 2)
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+
+legend("bottomright",
+       legend = c(
+         paste0("Logistic regression (", round(auc_lr_test,  3), ")"),
+         paste0("Lasso (",               round(auc_lasso_test,3), ")"),
+         paste0("Ridge (",               round(auc_ridge_test,3), ")"),
+         paste0("Random Forest (",       round(auc_rf_test,  3), ")")
+       ),
+       col = c("#3B8BD4","#E24B4A","#EF9F27","#1D9E75"),
+       lwd = 2, cex = 0.85)
+```
+
+```{r best_calibration}
+val.prob(pred_lr, y_test)
+title("Calibration — best model (logistic regression)", line = 0.5)
+```
+
+NOTES:
+
+The overfitting table shows whether any model memorised training data
+The 0.3 threshold comparison shows sensitivity gains at cost of specificity
+clinically motivated because missing GBM is worse than over-flagging
+Plain logistic regression wins on calibration — best for clinical use
+All four models have very similar AUC — the problem is learnable with simple methods, complexity does not help here.
